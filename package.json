@@ -4,11 +4,9 @@
   "description": "Sistema de agendamento profissional multi-nicho",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node database/init.js && node database/seed.js && node src/server.js",
     "dev": "nodemon src/server.js",
-    "db:init": "node database/init.js",
-    "db:seed": "node database/seed.js",
-    "build": "node database/init.js && node database/seed.js"
+    "build": "echo 'Build ok'"
   },
   "dependencies": {
     "express": "^4.18.2",

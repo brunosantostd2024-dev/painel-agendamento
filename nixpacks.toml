@@ -1,0 +1,5 @@
+[phases.build]
+cmds = ["npm install --production=false"]
+
+[start]
+cmd = "node database/init.js && node database/seed.js && node src/server.js"
