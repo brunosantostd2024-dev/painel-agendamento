@@ -1,97 +1,39 @@
 // src/routes/relatorios.js
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
-const getDb = require('../models/db');
+const { getOne, getAll } = require('../models/db');
 
-// GET /api/relatorios/resumo?est=ID&periodo=mes|semana|ano
-router.get('/resumo', requireAuth, (req, res) => {
-  const { est, periodo } = req.query;
-  const db = getDb();
+router.get('/resumo', requireAuth, async (req, res) => {
+  try {
+    const { est, periodo } = req.query;
+    let dataInicio;
+    const hoje = new Date();
+    if (periodo==='semana') { const d=new Date(hoje); d.setDate(d.getDate()-7); dataInicio=d.toISOString().split('T')[0]; }
+    else if (periodo==='ano') dataInicio=`${hoje.getFullYear()}-01-01`;
+    else dataInicio=`${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}-01`;
 
-  let dataInicio;
-  const hoje = new Date();
-  if (periodo === 'semana') {
-    const d = new Date(hoje); d.setDate(d.getDate() - 7);
-    dataInicio = d.toISOString().split('T')[0];
-  } else if (periodo === 'ano') {
-    dataInicio = `${hoje.getFullYear()}-01-01`;
-  } else {
-    dataInicio = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}-01`;
-  }
-
-  const faturamento = db.prepare(`
-    SELECT COALESCE(SUM(s.preco), 0) as total
-    FROM agendamentos a JOIN servicos s ON s.id = a.servico_id
-    WHERE a.estabelecimento_id = ? AND a.data >= ? AND a.status = 'concluido'
-  `).get(est, dataInicio);
-
-  const atendimentos = db.prepare(`
-    SELECT COUNT(*) as total FROM agendamentos
-    WHERE estabelecimento_id = ? AND data >= ? AND status = 'concluido'
-  `).get(est, dataInicio);
-
-  const cancelamentos = db.prepare(`
-    SELECT COUNT(*) as total FROM agendamentos
-    WHERE estabelecimento_id = ? AND data >= ? AND status = 'cancelado'
-  `).get(est, dataInicio);
-
-  const totalAgendados = db.prepare(`
-    SELECT COUNT(*) as total FROM agendamentos
-    WHERE estabelecimento_id = ? AND data >= ?
-  `).get(est, dataInicio);
-
-  const ticket = atendimentos.total > 0 ? faturamento.total / atendimentos.total : 0;
-  const taxaCancelamento = totalAgendados.total > 0 ? (cancelamentos.total / totalAgendados.total * 100) : 0;
-
-  res.json({
-    faturamento: faturamento.total,
-    atendimentos: atendimentos.total,
-    ticket_medio: Math.round(ticket * 100) / 100,
-    cancelamentos: cancelamentos.total,
-    taxa_cancelamento: Math.round(taxaCancelamento * 10) / 10,
-  });
+    const fat = await getOne(`SELECT COALESCE(SUM(s.preco),0) as total FROM agendamentos a JOIN servicos s ON s.id=a.servico_id WHERE a.estabelecimento_id=$1 AND a.data>=$2 AND a.status='concluido'`, [est, dataInicio]);
+    const atend = await getOne(`SELECT COUNT(*) as total FROM agendamentos WHERE estabelecimento_id=$1 AND data>=$2 AND status='concluido'`, [est, dataInicio]);
+    const canc = await getOne(`SELECT COUNT(*) as total FROM agendamentos WHERE estabelecimento_id=$1 AND data>=$2 AND status='cancelado'`, [est, dataInicio]);
+    const totalAg = await getOne(`SELECT COUNT(*) as total FROM agendamentos WHERE estabelecimento_id=$1 AND data>=$2`, [est, dataInicio]);
+    const atendN = parseInt(atend.total)||0;
+    const fatN = parseFloat(fat.total)||0;
+    const cancN = parseInt(canc.total)||0;
+    const totalN = parseInt(totalAg.total)||1;
+    res.json({ faturamento: fatN, atendimentos: atendN, ticket_medio: atendN>0?Math.round(fatN/atendN*100)/100:0, cancelamentos: cancN, taxa_cancelamento: Math.round(cancN/totalN*1000)/10 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/relatorios/por-servico?est=ID
-router.get('/por-servico', requireAuth, (req, res) => {
-  const { est } = req.query;
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT s.nome, COUNT(a.id) as qtd, SUM(s.preco) as total
-    FROM agendamentos a JOIN servicos s ON s.id = a.servico_id
-    WHERE a.estabelecimento_id = ? AND a.status = 'concluido'
-    GROUP BY s.id ORDER BY qtd DESC LIMIT 10
-  `).all(est);
-  res.json(rows);
+router.get('/por-servico', requireAuth, async (req, res) => {
+  try {
+    res.json(await getAll(`SELECT s.nome, COUNT(a.id) as qtd, COALESCE(SUM(s.preco),0) as total FROM agendamentos a JOIN servicos s ON s.id=a.servico_id WHERE a.estabelecimento_id=$1 AND a.status='concluido' GROUP BY s.id ORDER BY qtd DESC LIMIT 10`, [req.query.est]));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/relatorios/por-profissional?est=ID
-router.get('/por-profissional', requireAuth, (req, res) => {
-  const { est } = req.query;
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT p.nome, COUNT(a.id) as atendimentos, SUM(s.preco) as faturamento
-    FROM agendamentos a
-    JOIN profissionais p ON p.id = a.profissional_id
-    JOIN servicos s ON s.id = a.servico_id
-    WHERE a.estabelecimento_id = ? AND a.status = 'concluido'
-    GROUP BY p.id ORDER BY faturamento DESC
-  `).all(est);
-  res.json(rows);
-});
-
-// GET /api/relatorios/por-dia?est=ID&mes=YYYY-MM
-router.get('/por-dia', requireAuth, (req, res) => {
-  const { est, mes } = req.query;
-  const db = getDb();
-  const mesStr = mes || new Date().toISOString().slice(0, 7);
-  const rows = db.prepare(`
-    SELECT a.data, COUNT(a.id) as agendamentos, SUM(s.preco) as faturamento
-    FROM agendamentos a JOIN servicos s ON s.id = a.servico_id
-    WHERE a.estabelecimento_id = ? AND a.data LIKE ? AND a.status = 'concluido'
-    GROUP BY a.data ORDER BY a.data
-  `).all(est, `${mesStr}%`);
-  res.json(rows);
+router.get('/por-profissional', requireAuth, async (req, res) => {
+  try {
+    res.json(await getAll(`SELECT p.nome, COUNT(a.id) as atendimentos, COALESCE(SUM(s.preco),0) as faturamento FROM agendamentos a JOIN profissionais p ON p.id=a.profissional_id JOIN servicos s ON s.id=a.servico_id WHERE a.estabelecimento_id=$1 AND a.status='concluido' GROUP BY p.id ORDER BY faturamento DESC`, [req.query.est]));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

@@ -1,8 +1,5 @@
 node_modules/
 .env
-database/agenda.db
 *.db
 .DS_Store
-Thumbs.db
 logs/
-*.log

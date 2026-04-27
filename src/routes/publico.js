@@ -1,83 +1,54 @@
-// src/routes/publico.js — Rota pública de agendamento sem login
+// src/routes/publico.js
 const router = require('express').Router();
-const getDb = require('../models/db');
+const { getOne, getAll, insert } = require('../models/db');
 
-// GET /agendar/:slug — dados do estabelecimento e slots disponíveis
-router.get('/:slug', (req, res) => {
-  const db = getDb();
-  const est = db.prepare('SELECT id, nome, nicho, cidade, estado, abertura, fechamento FROM estabelecimentos WHERE slug = ? AND ativo = 1').get(req.params.slug);
-  if (!est) return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
-
-  const servicos = db.prepare('SELECT id, nome, duracao_min, preco FROM servicos WHERE estabelecimento_id = ? AND ativo = 1 ORDER BY nome').all(est.id);
-  const profissionais = db.prepare('SELECT id, nome, especialidade FROM profissionais WHERE estabelecimento_id = ? AND ativo = 1 ORDER BY nome').all(est.id);
-
-  res.json({ estabelecimento: est, servicos, profissionais });
+router.get('/:slug', async (req, res) => {
+  try {
+    const est = await getOne('SELECT id,nome,nicho,cidade,estado,abertura,fechamento FROM estabelecimentos WHERE slug=$1 AND ativo=TRUE', [req.params.slug]);
+    if (!est) return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
+    const servicos = await getAll('SELECT id,nome,duracao_min,preco FROM servicos WHERE estabelecimento_id=$1 AND ativo=TRUE ORDER BY nome', [est.id]);
+    const profissionais = await getAll('SELECT id,nome,especialidade FROM profissionais WHERE estabelecimento_id=$1 AND ativo=TRUE ORDER BY nome', [est.id]);
+    res.json({ estabelecimento: est, servicos, profissionais });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /agendar/:slug/horarios?data=YYYY-MM-DD&servico_id=X&profissional_id=Y
-router.get('/:slug/horarios', (req, res) => {
-  const { data, servico_id, profissional_id } = req.query;
-  const db = getDb();
-  const est = db.prepare('SELECT id, abertura, fechamento FROM estabelecimentos WHERE slug = ? AND ativo = 1').get(req.params.slug);
-  if (!est) return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
-
-  const svc = servico_id ? db.prepare('SELECT duracao_min FROM servicos WHERE id = ?').get(servico_id) : null;
-  const duracao = svc ? svc.duracao_min : 30;
-
-  // Gera todos os slots do dia
-  const slots = [];
-  const [hAb, mAb] = (est.abertura || '08:00').split(':').map(Number);
-  const [hFe, mFe] = (est.fechamento || '19:00').split(':').map(Number);
-  let cur = hAb * 60 + mAb;
-  const fim = hFe * 60 + mFe;
-  while (cur + duracao <= fim) {
-    const hh = String(Math.floor(cur / 60)).padStart(2, '0');
-    const mm = String(cur % 60).padStart(2, '0');
-    slots.push(`${hh}:${mm}`);
-    cur += 30; // intervalo de 30 min
-  }
-
-  // Remove slots já ocupados
-  let sqlOcup = 'SELECT horario FROM agendamentos WHERE estabelecimento_id = ? AND data = ? AND status != ?';
-  const params = [est.id, data, 'cancelado'];
-  if (profissional_id) { sqlOcup += ' AND profissional_id = ?'; params.push(profissional_id); }
-  const ocupados = db.prepare(sqlOcup).all(...params).map(r => r.horario);
-
-  const disponiveis = slots.map(h => ({ horario: h, disponivel: !ocupados.includes(h) }));
-  res.json(disponiveis);
+router.get('/:slug/horarios', async (req, res) => {
+  try {
+    const { data, servico_id } = req.query;
+    const est = await getOne('SELECT id,abertura,fechamento FROM estabelecimentos WHERE slug=$1 AND ativo=TRUE', [req.params.slug]);
+    if (!est) return res.status(404).json({ error: 'Não encontrado.' });
+    const svc = servico_id ? await getOne('SELECT duracao_min FROM servicos WHERE id=$1', [servico_id]) : null;
+    const duracao = svc ? svc.duracao_min : 30;
+    const slots = [];
+    const [hAb,mAb] = (est.abertura||'08:00').split(':').map(Number);
+    const [hFe,mFe] = (est.fechamento||'19:00').split(':').map(Number);
+    let cur = hAb*60+mAb;
+    const fim = hFe*60+mFe;
+    while (cur+duracao<=fim) {
+      slots.push(`${String(Math.floor(cur/60)).padStart(2,'0')}:${String(cur%60).padStart(2,'0')}`);
+      cur+=30;
+    }
+    const ocupados = await getAll(`SELECT horario FROM agendamentos WHERE estabelecimento_id=$1 AND data=$2 AND status!='cancelado'`, [est.id, data]);
+    const ocup = ocupados.map(r=>r.horario);
+    res.json(slots.map(h=>({ horario:h, disponivel:!ocup.includes(h) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /agendar/:slug — cria agendamento público (cliente faz o próprio agendamento)
-router.post('/:slug', (req, res) => {
-  const { nome, whatsapp, servico_id, profissional_id, data, horario } = req.body;
-  if (!nome || !servico_id || !data || !horario) {
-    return res.status(400).json({ error: 'nome, servico_id, data e horario são obrigatórios.' });
-  }
-  const db = getDb();
-  const est = db.prepare('SELECT id FROM estabelecimentos WHERE slug = ? AND ativo = 1').get(req.params.slug);
-  if (!est) return res.status(404).json({ error: 'Estabelecimento não encontrado.' });
-
-  // Verifica conflito
-  const conflito = db.prepare(`
-    SELECT id FROM agendamentos WHERE estabelecimento_id = ? AND data = ? AND horario = ? AND status != 'cancelado'
-    ${profissional_id ? 'AND profissional_id = ?' : ''}
-  `).get(est.id, data, horario, ...(profissional_id ? [profissional_id] : []));
-  if (conflito) return res.status(409).json({ error: 'Horário indisponível. Escolha outro.' });
-
-  // Cria ou recupera cliente
-  let cliente = whatsapp ? db.prepare('SELECT id FROM clientes WHERE estabelecimento_id = ? AND whatsapp = ?').get(est.id, whatsapp) : null;
-  if (!cliente) {
-    const r = db.prepare('INSERT INTO clientes (estabelecimento_id, nome, whatsapp) VALUES (?,?,?)').run(est.id, nome, whatsapp || '');
-    cliente = { id: r.lastInsertRowid };
-  }
-
-  // Cria agendamento
-  const r = db.prepare(`
-    INSERT INTO agendamentos (estabelecimento_id, cliente_id, profissional_id, servico_id, data, horario, status)
-    VALUES (?, ?, ?, ?, ?, ?, 'pendente')
-  `).run(est.id, cliente.id, profissional_id || null, servico_id, data, horario);
-
-  res.status(201).json({ ok: true, agendamento_id: r.lastInsertRowid, mensagem: 'Agendamento realizado! Aguarde a confirmação.' });
+router.post('/:slug', async (req, res) => {
+  try {
+    const { nome, whatsapp, servico_id, profissional_id, data, horario } = req.body;
+    if (!nome||!servico_id||!data||!horario) return res.status(400).json({ error: 'Campos obrigatórios faltando.' });
+    const est = await getOne('SELECT id FROM estabelecimentos WHERE slug=$1 AND ativo=TRUE', [req.params.slug]);
+    if (!est) return res.status(404).json({ error: 'Não encontrado.' });
+    let cliente = whatsapp ? await getOne('SELECT id FROM clientes WHERE estabelecimento_id=$1 AND whatsapp=$2', [est.id, whatsapp]) : null;
+    if (!cliente) {
+      const id = await insert('INSERT INTO clientes (estabelecimento_id,nome,whatsapp) VALUES ($1,$2,$3)', [est.id, nome, whatsapp||'']);
+      cliente = { id };
+    }
+    const id = await insert(`INSERT INTO agendamentos (estabelecimento_id,cliente_id,profissional_id,servico_id,data,horario,status) VALUES ($1,$2,$3,$4,$5,$6,'pendente')`,
+      [est.id, cliente.id, profissional_id||null, servico_id, data, horario]);
+    res.status(201).json({ ok: true, agendamento_id: id, mensagem: 'Agendamento realizado! Aguarde confirmação.' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

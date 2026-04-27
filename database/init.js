@@ -1,19 +1,23 @@
+// database/init.js — Cria tabelas no PostgreSQL
 require('dotenv').config();
-const { initDb } = require('../src/models/db');
+const { query, pool } = require('../src/models/db');
 
-initDb().then(db => {
-  db.exec(`
+async function init() {
+  console.log('🔧 Criando tabelas no PostgreSQL...');
+
+  await query(`
     CREATE TABLE IF NOT EXISTS usuarios (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       nome TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       senha TEXT NOT NULL,
       role TEXT DEFAULT 'dono',
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      criado_em TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS estabelecimentos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      usuario_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
       nome TEXT NOT NULL,
       nicho TEXT NOT NULL,
       cidade TEXT,
@@ -22,66 +26,83 @@ initDb().then(db => {
       slug TEXT UNIQUE NOT NULL,
       abertura TEXT DEFAULT '08:00',
       fechamento TEXT DEFAULT '19:00',
-      ativo INTEGER DEFAULT 1,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      ativo BOOLEAN DEFAULT TRUE,
+      criado_em TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS profissionais (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      estabelecimento_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      estabelecimento_id INTEGER NOT NULL REFERENCES estabelecimentos(id),
       nome TEXT NOT NULL,
       especialidade TEXT,
       whatsapp TEXT,
-      ativo INTEGER DEFAULT 1,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      ativo BOOLEAN DEFAULT TRUE,
+      criado_em TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS servicos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      estabelecimento_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      estabelecimento_id INTEGER NOT NULL REFERENCES estabelecimentos(id),
       nome TEXT NOT NULL,
       duracao_min INTEGER DEFAULT 30,
-      preco REAL DEFAULT 0,
+      preco NUMERIC(10,2) DEFAULT 0,
       nicho TEXT,
-      ativo INTEGER DEFAULT 1
+      ativo BOOLEAN DEFAULT TRUE
     );
+
     CREATE TABLE IF NOT EXISTS clientes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      estabelecimento_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      estabelecimento_id INTEGER NOT NULL REFERENCES estabelecimentos(id),
       nome TEXT NOT NULL,
       whatsapp TEXT,
       email TEXT,
       observacoes TEXT,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      criado_em TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS agendamentos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      estabelecimento_id INTEGER NOT NULL,
-      cliente_id INTEGER NOT NULL,
-      profissional_id INTEGER,
-      servico_id INTEGER NOT NULL,
-      data TEXT NOT NULL,
+      id SERIAL PRIMARY KEY,
+      estabelecimento_id INTEGER NOT NULL REFERENCES estabelecimentos(id),
+      cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+      profissional_id INTEGER REFERENCES profissionais(id),
+      servico_id INTEGER NOT NULL REFERENCES servicos(id),
+      data DATE NOT NULL,
       horario TEXT NOT NULL,
       status TEXT DEFAULT 'pendente',
       observacoes TEXT,
-      lembrete_enviado INTEGER DEFAULT 0,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      lembrete_enviado BOOLEAN DEFAULT FALSE,
+      criado_em TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS lembretes_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agendamento_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id),
       tipo TEXT NOT NULL,
-      enviado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      enviado_em TIMESTAMP DEFAULT NOW(),
       status TEXT DEFAULT 'enviado'
     );
+
     CREATE TABLE IF NOT EXISTS configuracoes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      estabelecimento_id INTEGER UNIQUE NOT NULL,
-      lembrete_1h INTEGER DEFAULT 1,
-      lembrete_dia_anterior INTEGER DEFAULT 1,
-      confirmacao_imediata INTEGER DEFAULT 1,
-      lembrete_retorno INTEGER DEFAULT 0,
+      id SERIAL PRIMARY KEY,
+      estabelecimento_id INTEGER UNIQUE NOT NULL REFERENCES estabelecimentos(id),
+      lembrete_1h BOOLEAN DEFAULT TRUE,
+      lembrete_dia_anterior BOOLEAN DEFAULT TRUE,
+      confirmacao_imediata BOOLEAN DEFAULT TRUE,
+      lembrete_retorno BOOLEAN DEFAULT FALSE,
       msg_template TEXT DEFAULT 'Olá {nome}! Lembrete do seu {servico} hoje às {horario}. Te esperamos! 😊'
     );
+
+    CREATE TABLE IF NOT EXISTS session (
+      sid VARCHAR NOT NULL COLLATE "default",
+      sess JSON NOT NULL,
+      expire TIMESTAMP(6) NOT NULL,
+      CONSTRAINT session_pkey PRIMARY KEY (sid)
+    );
+    CREATE INDEX IF NOT EXISTS IDX_session_expire ON session(expire);
   `);
-  console.log('✅ Banco criado com sucesso!');
-  process.exit(0);
-}).catch(e => { console.error(e); process.exit(1); });
+
+  console.log('✅ Tabelas criadas com sucesso!');
+  await pool.end();
+}
+
+init().catch(e => { console.error('Erro:', e.message); process.exit(1); });
